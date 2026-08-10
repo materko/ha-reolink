@@ -98,10 +98,10 @@ index 6a47a035cfa..151124a9606 100644
  
      async def _async_generate_root(self) -> BrowseMediaSource:
 diff --git a/homeassistant/components/reolink/services.py b/homeassistant/components/reolink/services.py
-index 5867fb41829..e492c397883 100644
+index 5867fb41829..affafe48367 100644
 --- a/homeassistant/components/reolink/services.py
 +++ b/homeassistant/components/reolink/services.py
-@@ -1,28 +1,58 @@
+@@ -1,28 +1,63 @@
  """Reolink additional services."""
  
 +from datetime import datetime, timedelta
@@ -161,10 +161,15 @@ index 5867fb41829..e492c397883 100644
 +# without dragging in a needlessly large search.
 +VOD_SEARCH_MARGIN = timedelta(hours=4)
 +
++# A recorder only indexes the block it is currently writing every few minutes, so a
++# moment near the live edge reads as being past the end of a block that in fact
++# already holds the footage. Accept a block that ends this recently before the moment.
++VOD_INDEX_LAG = timedelta(minutes=15)
++
  
  @raise_translated_error
  async def _async_play_chime(service_call: ServiceCall) -> None:
-@@ -64,6 +94,167 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
+@@ -64,6 +99,174 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
          await chime.play(ChimeToneEnum[ringtone].value)
  
  
@@ -232,9 +237,16 @@ index 5867fb41829..e492c397883 100644
 +        channel, search_start, moment + timedelta(seconds=1), stream=stream
 +    )
 +
-+    recording = next(
-+        (file for file in files or [] if file.start_time <= moment <= file.end_time),
-+        None,
++    # The block covering the moment is the latest one that started before it, whether
++    # the recorder has caught up with indexing its end or not.
++    recording = max(
++        (
++            file
++            for file in files or []
++            if file.start_time <= moment <= file.end_time + VOD_INDEX_LAG
++        ),
++        key=lambda file: file.start_time,
++        default=None,
 +    )
 +    if recording is None:
 +        raise ServiceValidationError(
@@ -332,7 +344,7 @@ index 5867fb41829..e492c397883 100644
  @callback
  def async_setup_services(hass: HomeAssistant) -> None:
      """Set up Reolink services."""
-@@ -81,6 +272,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
+@@ -81,6 +284,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
              }
          ),
      )
