@@ -1,0 +1,5 @@
+{
+  "name": "Reolink (firmware 2.x)",
+  "homeassistant": "2026.8.0",
+  "hide_default_branch": true
+}

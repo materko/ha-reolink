@@ -1,0 +1,101 @@
+name: Build
+
+on:
+  schedule:
+    # Daily, at a quiet time. Home Assistant releases land on no fixed hour.
+    - cron: "17 4 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The patched reolink-aio, pinned to a commit so every build is reproducible.
+  # Bump this by hand after rebasing https://github.com/materko/reolink_aio
+  REOLINK_AIO: "reolink-aio @ git+https://github.com/materko/reolink_aio@73507ff7daebb440a994540c8291b80ea885ed69"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find the latest Home Assistant release
+        id: ha
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/home-assistant/core/releases/latest | jq -r .tag_name)
+          if [ -z "$tag" ] || [ "$tag" = "null" ]; then
+            echo "Could not determine the latest Home Assistant release" >&2
+            exit 1
+          fi
+          echo "Latest Home Assistant release: $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the reolink integration from that release
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            -b "${{ steps.ha.outputs.tag }}" \
+            https://github.com/home-assistant/core.git /tmp/core
+          git -C /tmp/core sparse-checkout set homeassistant/components/reolink
+          rm -rf custom_components/reolink
+          mkdir -p custom_components
+          cp -r /tmp/core/homeassistant/components/reolink custom_components/reolink
+
+      - name: Apply the firmware 2.x patch
+        run: |
+          # The patch is generated against homeassistant/components/reolink/, so strip
+          # that prefix and re-root it under custom_components/.
+          git apply -p3 --directory=custom_components --verbose patches/fw2x.patch
+
+      - name: Point the manifest at the patched reolink-aio
+        run: |
+          jq --arg r "$REOLINK_AIO" '.requirements = [$r]' \
+            custom_components/reolink/manifest.json > /tmp/manifest.json
+          mv /tmp/manifest.json custom_components/reolink/manifest.json
+
+      - name: Stop unless something actually changed
+        id: check
+        run: |
+          # Carry the previously released version across, so a rebuild that only
+          # differs by the version number is not mistaken for a real change.
+          prev=$(git show HEAD:custom_components/reolink/manifest.json 2>/dev/null | jq -r '.version // empty' || true)
+          if [ -n "$prev" ]; then
+            jq --arg v "$prev" '.version = $v' custom_components/reolink/manifest.json > /tmp/manifest.json
+            mv /tmp/manifest.json custom_components/reolink/manifest.json
+          fi
+
+          if git diff --quiet -- custom_components && [ -z "$(git status --porcelain custom_components)" ]; then
+            echo "The integration is unchanged since the last build, nothing to release."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stamp the version and commit
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          jq --arg v "${{ steps.ha.outputs.tag }}" '.version = $v' \
+            custom_components/reolink/manifest.json > /tmp/manifest.json
+          mv /tmp/manifest.json custom_components/reolink/manifest.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_components
+          git commit -m "Build for Home Assistant ${{ steps.ha.outputs.tag }}"
+          git push
+
+      - name: Publish the release HACS installs from
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ha.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists, leaving it alone."
+            exit 0
+          fi
+          gh release create "$tag" \
+            --title "Home Assistant $tag" \
+            --notes "Reolink integration from Home Assistant $tag, patched for NVR firmware 2.x."
