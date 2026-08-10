@@ -28,7 +28,7 @@
   ],
   "quality_scale": "platinum",
   "requirements": [
-    "reolink-aio @ git+https://github.com/materko/reolink_aio@73507ff7daebb440a994540c8291b80ea885ed69"
+    "reolink-aio @ git+https://github.com/materko/reolink_aio@46c12354671b1281071ea8e16c9d249c4a14e018"
   ],
   "version": "2026.8.1"
 }
