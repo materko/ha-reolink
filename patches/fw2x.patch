@@ -98,13 +98,17 @@ index 6a47a035cfa..151124a9606 100644
  
      async def _async_generate_root(self) -> BrowseMediaSource:
 diff --git a/homeassistant/components/reolink/services.py b/homeassistant/components/reolink/services.py
-index 5867fb41829..e492c397883 100644
+index 5867fb41829..d75edeb8c0a 100644
 --- a/homeassistant/components/reolink/services.py
 +++ b/homeassistant/components/reolink/services.py
-@@ -1,28 +1,58 @@
+@@ -1,28 +1,68 @@
  """Reolink additional services."""
  
++import asyncio
 +from datetime import datetime, timedelta
++from functools import partial
++import logging
++import os
 +from urllib.parse import quote
 +
  from reolink_aio.api import Chime
@@ -119,6 +123,7 @@ index 5867fb41829..e492c397883 100644
 +from homeassistant.config_entries import ConfigEntry, ConfigEntryState
  from homeassistant.const import ATTR_DEVICE_ID
 -from homeassistant.core import HomeAssistant, ServiceCall, callback
+-from homeassistant.exceptions import ServiceValidationError
 +from homeassistant.core import (
 +    HomeAssistant,
 +    ServiceCall,
@@ -126,7 +131,7 @@ index 5867fb41829..e492c397883 100644
 +    SupportsResponse,
 +    callback,
 +)
- from homeassistant.exceptions import ServiceValidationError
++from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
  from homeassistant.helpers import (
      config_validation as cv,
      device_registry as dr,
@@ -161,10 +166,16 @@ index 5867fb41829..e492c397883 100644
 +# without dragging in a needlessly large search.
 +VOD_SEARCH_MARGIN = timedelta(hours=4)
 +
++# How long past the length of a clip to wait before giving up on ffmpeg. A recorder
++# usually delivers stored footage faster than real time, so this is slack, not budget.
++FFMPEG_GRACE = 60
++
++_LOGGER = logging.getLogger(__name__)
++
  
  @raise_translated_error
  async def _async_play_chime(service_call: ServiceCall) -> None:
-@@ -64,6 +94,167 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
+@@ -64,6 +104,207 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
          await chime.play(ChimeToneEnum[ringtone].value)
  
  
@@ -281,7 +292,8 @@ index 5867fb41829..e492c397883 100644
 +
 +    Pulls the footage straight off the recorder rather than off the live stream, so
 +    the clip can start before the moment that triggered it without Home Assistant
-+    having to keep a preloaded stream running.
++    having to keep a preloaded stream running. The clip is "duration" long in total
++    and "pre_roll" of that sits before the moment.
 +    """
 +    device, _config_entry, host, channel, moment, recording = (
 +        await _async_locate_recording(service_call, SERVICE_VOD_DOWNLOAD)
@@ -306,20 +318,59 @@ index 5867fb41829..e492c397883 100644
 +        channel, filename, stream_res, vod_type, seek
 +    )
 +
-+    # Imported here so that setting up the integration does not pull in the stream
-+    # stack, which only this service needs.
-+    from homeassistant.components.camera import (  # noqa: PLC0415
-+        DynamicStreamSettings,
-+    )
-+    from homeassistant.components.stream import create_stream  # noqa: PLC0415
++    hass = service_call.hass
++    if not hass.config.is_allowed_path(video_path):
++        raise ServiceValidationError(
++            translation_domain=DOMAIN,
++            translation_key="service_path_not_allowed",
++            translation_placeholders={"path": video_path},
++        )
 +
-+    stream = create_stream(service_call.hass, url, {}, DynamicStreamSettings())
++    # Imported here so that setting up the integration does not pull in ffmpeg,
++    # which only this service needs.
++    from homeassistant.components.ffmpeg import get_ffmpeg_manager  # noqa: PLC0415
++
++    await hass.async_add_executor_job(
++        partial(os.makedirs, os.path.dirname(video_path), exist_ok=True)
++    )
++
++    # Cut on the timestamps in the video rather than on elapsed time: a recorder
++    # hands its stored footage over faster than real time, so a wall-clock cut
++    # yields a clip of an unpredictable length. Only the audio is re-encoded,
++    # because a recorder's audio codec is often one an MP4 cannot carry.
++    process = await asyncio.create_subprocess_exec(
++        get_ffmpeg_manager(hass).binary,
++        *("-nostdin", "-y", "-loglevel", "error"),
++        *("-i", url),
++        *("-t", str(duration)),
++        *("-c:v", "copy", "-c:a", "aac"),
++        *("-movflags", "+faststart"),
++        video_path,
++        stdout=asyncio.subprocess.DEVNULL,
++        stderr=asyncio.subprocess.PIPE,
++    )
 +    try:
-+        await stream.async_record(video_path, duration=duration, lookback=0)
-+    finally:
-+        # Nothing else consumes this stream, so let go of the recorder connection
-+        # instead of waiting for it to time out.
-+        await stream.stop()
++        async with asyncio.timeout(duration + FFMPEG_GRACE):
++            _stdout, stderr = await process.communicate()
++    except TimeoutError:
++        process.kill()
++        raise HomeAssistantError(
++            translation_domain=DOMAIN,
++            translation_key="service_recording_timeout",
++            translation_placeholders={"path": video_path},
++        ) from None
++
++    if process.returncode != 0:
++        _LOGGER.error(
++            "Saving a recording of %s failed: %s",
++            host.api.camera_name(channel),
++            host.api.hide_password(stderr.decode(errors="replace").strip()),
++        )
++        raise HomeAssistantError(
++            translation_domain=DOMAIN,
++            translation_key="service_recording_failed",
++            translation_placeholders={"device_name": str(device.name)},
++        )
 +
 +    return {
 +        "filename": video_path,
@@ -332,7 +383,7 @@ index 5867fb41829..e492c397883 100644
  @callback
  def async_setup_services(hass: HomeAssistant) -> None:
      """Set up Reolink services."""
-@@ -81,6 +272,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
+@@ -81,6 +322,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
              }
          ),
      )
@@ -449,10 +500,10 @@ index fe7fba9cdc7..4261bf62608 100644
    fields:
      device_id:
 diff --git a/homeassistant/components/reolink/strings.json b/homeassistant/components/reolink/strings.json
-index f695251a152..be0a7cc5961 100644
+index f695251a152..fdbc544fde3 100644
 --- a/homeassistant/components/reolink/strings.json
 +++ b/homeassistant/components/reolink/strings.json
-@@ -922,6 +922,12 @@
+@@ -922,6 +922,21 @@
      "service_not_chime": {
        "message": "Reolink play_chime error: {device_name} is not a Chime"
      },
@@ -462,10 +513,19 @@ index f695251a152..be0a7cc5961 100644
 +    "service_no_recording": {
 +      "message": "Reolink error: {device_name} has no recording covering {moment}"
 +    },
++    "service_path_not_allowed": {
++      "message": "Reolink error: no access to write {path}, add its directory to allowlist_external_dirs"
++    },
++    "service_recording_failed": {
++      "message": "Reolink error: saving a recording of {device_name} failed, see the log for details"
++    },
++    "service_recording_timeout": {
++      "message": "Reolink error: saving a recording to {path} took too long and was stopped"
++    },
      "subscription_error": {
        "message": "Error during ONVIF subscription: {err}"
      },
-@@ -1022,6 +1028,58 @@
+@@ -1022,6 +1037,58 @@
          }
        },
        "name": "PTZ move"
@@ -478,7 +538,7 @@ index f695251a152..be0a7cc5961 100644
 +          "name": "Camera"
 +        },
 +        "duration": {
-+          "description": "How much video to save.",
++          "description": "Length of the whole clip, the pre-roll included.",
 +          "name": "Duration"
 +        },
 +        "filename": {
