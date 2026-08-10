@@ -21,6 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Releases are compared against, so their tags have to be present.
+          fetch-depth: 0
 
       - name: Find the latest Home Assistant release
         id: ha
@@ -32,6 +35,36 @@ jobs:
           fi
           echo "Latest Home Assistant release: $tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Find the newest build already published for it
+        id: prev
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Builds are named after the Home Assistant release they come from. A changed
+          # patch or a moved library pin rebuilds against the *same* Home Assistant
+          # release, so those carry a revision suffix - without one the release tag
+          # would not move and HACS would never see the update.
+          base="${{ steps.ha.outputs.tag }}"
+          highest=-1
+          latest=""
+          for tag in $(gh release list --limit 100 --json tagName -q '.[].tagName'); do
+            case "$tag" in
+              "$base") rev=0 ;;
+              "$base".*) rev="${tag##*.}" ;;
+              *) continue ;;
+            esac
+            case "$rev" in
+              ''|*[!0-9]*) continue ;;
+            esac
+            if [ "$rev" -gt "$highest" ]; then
+              highest="$rev"
+              latest="$tag"
+            fi
+          done
+          echo "Newest published build: ${latest:-none}"
+          echo "highest=$highest" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
       - name: Fetch the reolink integration from that release
         run: |
@@ -55,35 +88,55 @@ jobs:
             custom_components/reolink/manifest.json > /tmp/manifest.json
           mv /tmp/manifest.json custom_components/reolink/manifest.json
 
-      - name: Stop unless something actually changed
+      - name: Stop unless the result differs from the published build
         id: check
         run: |
-          # Carry the previously released version across, so a rebuild that only
-          # differs by the version number is not mistaken for a real change.
-          prev=$(git show HEAD:custom_components/reolink/manifest.json 2>/dev/null | jq -r '.version // empty' || true)
+          latest="${{ steps.prev.outputs.latest }}"
+          if [ -z "$latest" ]; then
+            echo "Nothing published yet."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Carry the published version across before comparing, so a rebuild that
+          # differs only by the version number is not mistaken for a real change.
+          prev=$(git show "$latest:custom_components/reolink/manifest.json" | jq -r '.version // empty')
           if [ -n "$prev" ]; then
             jq --arg v "$prev" '.version = $v' custom_components/reolink/manifest.json > /tmp/manifest.json
             mv /tmp/manifest.json custom_components/reolink/manifest.json
           fi
 
-          if git diff --quiet -- custom_components && [ -z "$(git status --porcelain custom_components)" ]; then
-            echo "The integration is unchanged since the last build, nothing to release."
+          if git diff --quiet "$latest" -- custom_components \
+             && [ -z "$(git status --porcelain custom_components)" ]; then
+            echo "Identical to $latest, nothing to release."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
+            echo "Differs from $latest."
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Stamp the version and commit
+        id: version
         if: steps.check.outputs.changed == 'true'
         run: |
-          jq --arg v "${{ steps.ha.outputs.tag }}" '.version = $v' \
+          base="${{ steps.ha.outputs.tag }}"
+          highest="${{ steps.prev.outputs.highest }}"
+          if [ "$highest" -lt 0 ]; then
+            version="$base"
+          else
+            version="$base.$((highest + 1))"
+          fi
+          echo "Publishing as $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          jq --arg v "$version" '.version = $v' \
             custom_components/reolink/manifest.json > /tmp/manifest.json
           mv /tmp/manifest.json custom_components/reolink/manifest.json
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add custom_components
-          git commit -m "Build for Home Assistant ${{ steps.ha.outputs.tag }}"
+          git commit -m "Build $version for Home Assistant $base"
           git push
 
       - name: Publish the release HACS installs from
@@ -91,11 +144,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ steps.ha.outputs.tag }}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            echo "Release $tag already exists, leaving it alone."
-            exit 0
-          fi
-          gh release create "$tag" \
-            --title "Home Assistant $tag" \
-            --notes "Reolink integration from Home Assistant $tag, patched for NVR firmware 2.x."
+          gh release create "${{ steps.version.outputs.version }}" \
+            --title "Home Assistant ${{ steps.ha.outputs.tag }}" \
+            --notes "Reolink integration from Home Assistant ${{ steps.ha.outputs.tag }}, patched for NVR firmware 2.x."
