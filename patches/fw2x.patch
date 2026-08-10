@@ -1,46 +1,42 @@
 diff --git a/homeassistant/components/reolink/media_source.py b/homeassistant/components/reolink/media_source.py
-index 6a47a035cfa..9540da115db 100644
+index 6a47a035cfa..151124a9606 100644
 --- a/homeassistant/components/reolink/media_source.py
 +++ b/homeassistant/components/reolink/media_source.py
-@@ -19,6 +19,7 @@ from homeassistant.components.media_source import (
+@@ -19,9 +19,10 @@ from homeassistant.components.media_source import (
  from homeassistant.components.stream import create_stream
  from homeassistant.core import HomeAssistant
  from homeassistant.helpers import device_registry as dr, entity_registry as er
 +from homeassistant.util import dt as dt_util
  
  from .const import DOMAIN
- from .util import get_host
-@@ -75,6 +76,10 @@ class ReolinkVODMediaSource(MediaSource):
+-from .util import get_host
++from .util import get_host, get_seek, get_vod_type
+ from .views import async_generate_playback_proxy_url
+ 
+ _LOGGER = logging.getLogger(__name__)
+@@ -74,16 +75,7 @@ class ReolinkVODMediaSource(MediaSource):
+ 
          host = get_host(self.hass, config_entry_id)
  
-         def get_vod_type() -> VodRequestType:
-+            if host.api.is_nvr and host.api.firmware_v2:
-+                # Firmware 2.x NVRs support neither the Download nor the Playback
-+                # command, their recordings are only reachable over plain RTMP.
-+                return VodRequestType.RTMP
-             if filename.endswith((".mp4", ".vref")) or host.api.is_hub:
-                 if host.api.is_nvr:
-                     return VodRequestType.DOWNLOAD
-@@ -98,8 +103,25 @@ class ReolinkVODMediaSource(MediaSource):
+-        def get_vod_type() -> VodRequestType:
+-            if filename.endswith((".mp4", ".vref")) or host.api.is_hub:
+-                if host.api.is_nvr:
+-                    return VodRequestType.DOWNLOAD
+-                return VodRequestType.PLAYBACK
+-            if host.api.is_nvr:
+-                return VodRequestType.NVR_DOWNLOAD
+-            return VodRequestType.RTMP
+-
+-        vod_type = get_vod_type()
++        vod_type = get_vod_type(host, filename)
+ 
+         if vod_type is VodRequestType.NVR_DOWNLOAD:
+             filename = f"{start_time}_{end_time}"
+@@ -98,8 +90,10 @@ class ReolinkVODMediaSource(MediaSource):
              )
              return PlayMedia(proxy_url, "video/mp4")
  
-+        # A long recording is browsed as shorter segments that all carry the same file
-+        # name, so without a seek every segment would replay the file from its start.
-+        # "filename" is the file's playback time in UTC, while start_time is the
-+        # segment's start in the device's local time — convert before subtracting.
-+        seek = 0
-+        try:
-+            file_start = dt.datetime.strptime(filename, "%Y%m%d%H%M%S").replace(
-+                tzinfo=dt.UTC
-+            )
-+            segment_start = dt.datetime.strptime(start_time, "%Y%m%d%H%M%S").replace(
-+                tzinfo=dt_util.DEFAULT_TIME_ZONE
-+            )
-+            seek = max(0, int((segment_start - file_start).total_seconds()))
-+        except ValueError:
-+            # Some devices name recordings instead of timestamping them; play from the start.
-+            _LOGGER.debug("Could not derive a seek offset from '%s'", filename)
++        seek = get_seek(filename, start_time)
 +
          mime_type, url = await host.api.get_vod_source(
 -            channel, filename, stream_res, vod_type
@@ -48,7 +44,7 @@ index 6a47a035cfa..9540da115db 100644
          )
          if _LOGGER.isEnabledFor(logging.DEBUG):
              _LOGGER.debug(
-@@ -176,6 +198,52 @@ class ReolinkVODMediaSource(MediaSource):
+@@ -176,6 +170,52 @@ class ReolinkVODMediaSource(MediaSource):
              )
  
          # pylint: disable-next=home-assistant-exception-not-translated
@@ -102,17 +98,19 @@ index 6a47a035cfa..9540da115db 100644
  
      async def _async_generate_root(self) -> BrowseMediaSource:
 diff --git a/homeassistant/components/reolink/services.py b/homeassistant/components/reolink/services.py
-index 5867fb41829..ba05c3e17e7 100644
+index 5867fb41829..e492c397883 100644
 --- a/homeassistant/components/reolink/services.py
 +++ b/homeassistant/components/reolink/services.py
-@@ -1,19 +1,30 @@
+@@ -1,28 +1,58 @@
  """Reolink additional services."""
  
 +from datetime import datetime, timedelta
 +from urllib.parse import quote
 +
  from reolink_aio.api import Chime
- from reolink_aio.enums import ChimeToneEnum
+-from reolink_aio.enums import ChimeToneEnum
++from reolink_aio.enums import ChimeToneEnum, VodRequestType
++from reolink_aio.typings import VOD_file
 +from reolink_aio.utils import to_reolink_time_id
  import voluptuous as vol
  
@@ -134,18 +132,29 @@ index 5867fb41829..ba05c3e17e7 100644
      device_registry as dr,
      service,
  )
-+from homeassistant.util import dt as dt_util
++from homeassistant.util import dt as dt_util, slugify
  
  from .const import DOMAIN, SUPPORT_PTZ_SPEED
  from .host import ReolinkHost
-@@ -23,6 +34,16 @@ ATTR_RINGTONE = "ringtone"
+-from .util import get_device_uid_and_ch, raise_translated_error
++from .util import (
++    get_device_uid_and_ch,
++    get_seek,
++    get_vod_type,
++    raise_translated_error,
++)
+ 
+ ATTR_RINGTONE = "ringtone"
  ATTR_SPEED = "speed"
  SERVICE_PTZ_MOVE = "ptz_move"
  
 +ATTR_TIMESTAMP = "timestamp"
 +ATTR_PRE_ROLL = "pre_roll"
 +ATTR_STREAM = "stream"
++ATTR_DURATION = "duration"
++ATTR_FILENAME = "filename"
 +SERVICE_VOD_LINK = "vod_link"
++SERVICE_VOD_DOWNLOAD = "vod_download"
 +
 +# How far back to look for the recording covering a moment. Continuous recording is
 +# stored in blocks of roughly an hour, so a few hours of margin finds the block
@@ -155,7 +164,7 @@ index 5867fb41829..ba05c3e17e7 100644
  
  @raise_translated_error
  async def _async_play_chime(service_call: ServiceCall) -> None:
-@@ -64,6 +85,106 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
+@@ -64,6 +94,167 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
          await chime.play(ChimeToneEnum[ringtone].value)
  
  
@@ -186,17 +195,17 @@ index 5867fb41829..ba05c3e17e7 100644
 +    return device, config_entry
 +
 +
-+@raise_translated_error
-+async def _async_vod_link(service_call: ServiceCall) -> ServiceResponse:
-+    """Return a link that plays the recording covering a given moment.
++async def _async_locate_recording(
++    service_call: ServiceCall, service_name: str
++) -> tuple[dr.DeviceEntry, ConfigEntry, ReolinkHost, int, datetime, VOD_file]:
++    """Find the recording covering the requested moment.
 +
-+    Built for reaching the footage behind an alarm: the recorder holds hours of
-+    continuous video, and this locates the block covering the moment and hands back
-+    an identifier that starts playback there rather than at the top of the block.
++    The recorder holds hours of continuous video, so reaching the footage behind an
++    alarm means locating the block the moment falls in.
 +    """
 +    service_data = service_call.data
 +    device, config_entry = _get_device_entry(
-+        service_call, service_data[ATTR_DEVICE_ID], SERVICE_VOD_LINK
++        service_call, service_data[ATTR_DEVICE_ID], service_name
 +    )
 +
 +    host: ReolinkHost = config_entry.runtime_data.host
@@ -224,11 +233,7 @@ index 5867fb41829..ba05c3e17e7 100644
 +    )
 +
 +    recording = next(
-+        (
-+            file
-+            for file in files or []
-+            if file.start_time <= moment <= file.end_time
-+        ),
++        (file for file in files or [] if file.start_time <= moment <= file.end_time),
 +        None,
 +    )
 +    if recording is None:
@@ -240,6 +245,17 @@ index 5867fb41829..ba05c3e17e7 100644
 +                "moment": moment.isoformat(timespec="seconds"),
 +            },
 +        )
++
++    return device, config_entry, host, channel, moment, recording
++
++
++@raise_translated_error
++async def _async_vod_link(service_call: ServiceCall) -> ServiceResponse:
++    """Return a link that plays the recording covering a given moment."""
++    _device, config_entry, _host, channel, moment, recording = (
++        await _async_locate_recording(service_call, SERVICE_VOD_LINK)
++    )
++    stream = service_call.data[ATTR_STREAM]
 +
 +    # The media source derives the seek offset from the difference between this start
 +    # time and the start of the block, so naming the moment here starts playback there.
@@ -259,10 +275,64 @@ index 5867fb41829..ba05c3e17e7 100644
 +    }
 +
 +
++@raise_translated_error
++async def _async_vod_download(service_call: ServiceCall) -> ServiceResponse:
++    """Copy the recording covering a given moment into Home Assistant.
++
++    Pulls the footage straight off the recorder rather than off the live stream, so
++    the clip can start before the moment that triggered it without Home Assistant
++    having to keep a preloaded stream running.
++    """
++    device, _config_entry, host, channel, moment, recording = (
++        await _async_locate_recording(service_call, SERVICE_VOD_DOWNLOAD)
++    )
++    service_data = service_call.data
++    stream_res = service_data[ATTR_STREAM]
++    duration = service_data[ATTR_DURATION]
++
++    video_path = service_data.get(ATTR_FILENAME) or (
++        f"/media/reolink/{slugify(str(device.name))}"
++        f"/{moment.strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
++    )
++
++    filename = recording.file_name
++    vod_type = get_vod_type(host, filename)
++    seek = get_seek(filename, to_reolink_time_id(moment))
++    if vod_type is VodRequestType.NVR_DOWNLOAD:
++        # This request type addresses a recording by the span it covers, not by name.
++        filename = f"{recording.start_time_id}_{recording.end_time_id}"
++
++    _mime_type, url = await host.api.get_vod_source(
++        channel, filename, stream_res, vod_type, seek
++    )
++
++    # Imported here so that setting up the integration does not pull in the stream
++    # stack, which only this service needs.
++    from homeassistant.components.camera import (  # noqa: PLC0415
++        DynamicStreamSettings,
++    )
++    from homeassistant.components.stream import create_stream  # noqa: PLC0415
++
++    stream = create_stream(service_call.hass, url, {}, DynamicStreamSettings())
++    try:
++        await stream.async_record(video_path, duration=duration, lookback=0)
++    finally:
++        # Nothing else consumes this stream, so let go of the recorder connection
++        # instead of waiting for it to time out.
++        await stream.stop()
++
++    return {
++        "filename": video_path,
++        "start": moment.isoformat(timespec="seconds"),
++        "duration": duration,
++        "recording_start": recording.start_time.isoformat(timespec="seconds"),
++    }
++
++
  @callback
  def async_setup_services(hass: HomeAssistant) -> None:
      """Set up Reolink services."""
-@@ -81,6 +202,20 @@ def async_setup_services(hass: HomeAssistant) -> None:
+@@ -81,6 +272,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
              }
          ),
      )
@@ -280,14 +350,32 @@ index 5867fb41829..ba05c3e17e7 100644
 +        ),
 +        supports_response=SupportsResponse.ONLY,
 +    )
++    hass.services.async_register(
++        DOMAIN,
++        SERVICE_VOD_DOWNLOAD,
++        _async_vod_download,
++        schema=vol.Schema(
++            {
++                vol.Required(ATTR_DEVICE_ID): cv.string,
++                vol.Optional(ATTR_TIMESTAMP): cv.datetime,
++                vol.Optional(ATTR_PRE_ROLL, default=0): cv.positive_int,
++                vol.Optional(ATTR_DURATION, default=30): vol.All(
++                    cv.positive_int, vol.Range(min=1, max=600)
++                ),
++                vol.Optional(ATTR_FILENAME): cv.string,
++                vol.Optional(ATTR_STREAM, default="sub"): vol.In(["sub", "main"]),
++            }
++        ),
++        supports_response=SupportsResponse.OPTIONAL,
++    )
      service.async_register_platform_entity_service(
          hass,
          DOMAIN,
 diff --git a/homeassistant/components/reolink/services.yaml b/homeassistant/components/reolink/services.yaml
-index fe7fba9cdc7..b8dcc5aa818 100644
+index fe7fba9cdc7..4261bf62608 100644
 --- a/homeassistant/components/reolink/services.yaml
 +++ b/homeassistant/components/reolink/services.yaml
-@@ -17,6 +17,33 @@ ptz_move:
+@@ -17,6 +17,72 @@ ptz_move:
            max: 64
            step: 1
  
@@ -318,11 +406,50 @@ index fe7fba9cdc7..b8dcc5aa818 100644
 +            - sub
 +            - main
 +
++vod_download:
++  fields:
++    device_id:
++      required: true
++      selector:
++        device:
++          filter:
++            integration: reolink
++    timestamp:
++      selector:
++        datetime:
++    pre_roll:
++      default: 0
++      selector:
++        number:
++          min: 0
++          max: 600
++          step: 1
++          unit_of_measurement: s
++    duration:
++      default: 30
++      selector:
++        number:
++          min: 1
++          max: 600
++          step: 1
++          unit_of_measurement: s
++    filename:
++      example: /media/reolink/front_door/alarm.mp4
++      selector:
++        text:
++    stream:
++      default: sub
++      selector:
++        select:
++          options:
++            - sub
++            - main
++
  play_chime:
    fields:
      device_id:
 diff --git a/homeassistant/components/reolink/strings.json b/homeassistant/components/reolink/strings.json
-index f695251a152..ff201a1ae65 100644
+index f695251a152..be0a7cc5961 100644
 --- a/homeassistant/components/reolink/strings.json
 +++ b/homeassistant/components/reolink/strings.json
 @@ -922,6 +922,12 @@
@@ -330,11 +457,148 @@ index f695251a152..ff201a1ae65 100644
        "message": "Reolink play_chime error: {device_name} is not a Chime"
      },
 +    "service_not_camera": {
-+      "message": "Reolink vod_link error: {device_name} is not a camera"
++      "message": "Reolink error: {device_name} is not a camera"
 +    },
 +    "service_no_recording": {
-+      "message": "Reolink vod_link error: {device_name} has no recording covering {moment}"
++      "message": "Reolink error: {device_name} has no recording covering {moment}"
 +    },
      "subscription_error": {
        "message": "Error during ONVIF subscription: {err}"
      },
+@@ -1022,6 +1028,58 @@
+         }
+       },
+       "name": "PTZ move"
++    },
++    "vod_download": {
++      "description": "Saves a recording from the device to Home Assistant, starting a chosen number of seconds before a given moment.",
++      "fields": {
++        "device_id": {
++          "description": "The Reolink camera to fetch the recording from.",
++          "name": "Camera"
++        },
++        "duration": {
++          "description": "How much video to save.",
++          "name": "Duration"
++        },
++        "filename": {
++          "description": "Where to write the video. Defaults to a file named after the moment under /media/reolink.",
++          "name": "File name"
++        },
++        "pre_roll": {
++          "description": "How long before the moment the video should start.",
++          "name": "Pre-roll"
++        },
++        "stream": {
++          "description": "Which recorded stream to use.",
++          "name": "Stream"
++        },
++        "timestamp": {
++          "description": "The moment to capture. Defaults to now.",
++          "name": "Moment"
++        }
++      },
++      "name": "Download recording"
++    },
++    "vod_link": {
++      "description": "Returns a link that plays the recording covering a given moment, starting a chosen number of seconds before it.",
++      "fields": {
++        "device_id": {
++          "description": "The Reolink camera to look up the recording for.",
++          "name": "Camera"
++        },
++        "pre_roll": {
++          "description": "How long before the moment playback should start.",
++          "name": "Pre-roll"
++        },
++        "stream": {
++          "description": "Which recorded stream to use.",
++          "name": "Stream"
++        },
++        "timestamp": {
++          "description": "The moment to play from. Defaults to now.",
++          "name": "Moment"
++        }
++      },
++      "name": "Recording link"
+     }
+   }
+ }
+diff --git a/homeassistant/components/reolink/util.py b/homeassistant/components/reolink/util.py
+index ecef195ebc2..6d28b72ceb3 100644
+--- a/homeassistant/components/reolink/util.py
++++ b/homeassistant/components/reolink/util.py
+@@ -2,8 +2,11 @@
+ 
+ from collections.abc import Awaitable, Callable, Coroutine
+ from dataclasses import dataclass
++import datetime as dt
++import logging
+ from typing import TYPE_CHECKING, Any
+ 
++from reolink_aio.enums import VodRequestType
+ from reolink_aio.exceptions import (
+     ApiError,
+     CredentialsInvalidError,
+@@ -26,6 +29,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+ from homeassistant.helpers import device_registry as dr
+ from homeassistant.helpers.storage import Store
+ from homeassistant.helpers.translation import async_get_exception_message
++from homeassistant.util import dt as dt_util
+ 
+ from .const import DOMAIN
+ 
+@@ -33,6 +37,8 @@ if TYPE_CHECKING:
+     from .coordinator import ReolinkDeviceCoordinator, ReolinkFirmwareCoordinator
+     from .host import ReolinkHost
+ 
++_LOGGER = logging.getLogger(__name__)
++
+ STORAGE_VERSION = 1
+ 
+ type ReolinkConfigEntry = config_entries.ConfigEntry[ReolinkData]
+@@ -56,6 +62,44 @@ def is_connected(hass: HomeAssistant, config_entry: config_entries.ConfigEntry)
+     )
+ 
+ 
++def get_vod_type(host: ReolinkHost, filename: str) -> VodRequestType:
++    """Return how a recording has to be fetched from this device."""
++    if host.api.is_nvr and host.api.firmware_v2:
++        # Firmware 2.x NVRs support neither the Download nor the Playback command,
++        # their recordings are only reachable over plain RTMP.
++        return VodRequestType.RTMP
++    if filename.endswith((".mp4", ".vref")) or host.api.is_hub:
++        if host.api.is_nvr:
++            return VodRequestType.DOWNLOAD
++        return VodRequestType.PLAYBACK
++    if host.api.is_nvr:
++        return VodRequestType.NVR_DOWNLOAD
++    return VodRequestType.RTMP
++
++
++def get_seek(filename: str, start_time: str) -> int:
++    """Return how far into a recording playback should start.
++
++    A long recording is browsed as shorter segments that all carry the same file
++    name, so without a seek every segment would replay the file from its start.
++    "filename" is the file's playback time in UTC while start_time is in the device's
++    local time, so both are converted before subtracting.
++    """
++    try:
++        file_start = dt.datetime.strptime(filename, "%Y%m%d%H%M%S").replace(
++            tzinfo=dt.UTC
++        )
++        segment_start = dt.datetime.strptime(start_time, "%Y%m%d%H%M%S").replace(
++            tzinfo=dt_util.DEFAULT_TIME_ZONE
++        )
++    except ValueError:
++        # Some devices name recordings instead of timestamping them; play from the start.
++        _LOGGER.debug("Could not derive a seek offset from '%s'", filename)
++        return 0
++
++    return max(0, int((segment_start - file_start).total_seconds()))
++
++
+ def get_host(hass: HomeAssistant, config_entry_id: str) -> ReolinkHost:
+     """Return the Reolink host from the config entry id."""
+     config_entry: ReolinkConfigEntry | None = hass.config_entries.async_get_entry(
