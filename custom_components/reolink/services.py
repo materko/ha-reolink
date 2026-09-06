@@ -14,7 +14,7 @@ from reolink_aio.utils import to_reolink_time_id
 import voluptuous as vol
 
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_DEVICE_ID
 from homeassistant.core import (
     HomeAssistant,
@@ -68,28 +68,11 @@ _LOGGER = logging.getLogger(__name__)
 async def _async_play_chime(service_call: ServiceCall) -> None:
     """Play a ringtone."""
     service_data = service_call.data
-    device_registry = dr.async_get(service_call.hass)
 
     for device_id in service_data[ATTR_DEVICE_ID]:
-        config_entry = None
-        device = device_registry.async_get(device_id)
-        if device is not None:
-            for entry_id in device.config_entries:
-                config_entry = service_call.hass.config_entries.async_get_entry(
-                    entry_id
-                )
-                if config_entry is not None and config_entry.domain == DOMAIN:
-                    break
-        if (
-            config_entry is None
-            or device is None
-            or config_entry.state is not ConfigEntryState.LOADED
-        ):
-            raise ServiceValidationError(
-                translation_domain=DOMAIN,
-                translation_key="service_entry_ex",
-                translation_placeholders={"service_name": "play_chime"},
-            )
+        device, config_entry = service.async_get_device_and_config_entry(
+            service_call.hass, DOMAIN, device_id
+        )
         host: ReolinkHost = config_entry.runtime_data.host
         (_device_uid, chime_id, is_chime) = get_device_uid_and_ch(device, host)
         chime: Chime | None = host.api.chime(chime_id)
@@ -104,35 +87,8 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
         await chime.play(ChimeToneEnum[ringtone].value)
 
 
-def _get_device_entry(
-    service_call: ServiceCall, device_id: str, service_name: str
-) -> tuple[dr.DeviceEntry, ConfigEntry]:
-    """Return the device and its loaded Reolink config entry."""
-    device = dr.async_get(service_call.hass).async_get(device_id)
-    config_entry = None
-    if device is not None:
-        for entry_id in device.config_entries:
-            entry = service_call.hass.config_entries.async_get_entry(entry_id)
-            if entry is not None and entry.domain == DOMAIN:
-                config_entry = entry
-                break
-
-    if (
-        device is None
-        or config_entry is None
-        or config_entry.state is not ConfigEntryState.LOADED
-    ):
-        raise ServiceValidationError(
-            translation_domain=DOMAIN,
-            translation_key="service_entry_ex",
-            translation_placeholders={"service_name": service_name},
-        )
-
-    return device, config_entry
-
-
 async def _async_locate_recording(
-    service_call: ServiceCall, service_name: str
+    service_call: ServiceCall,
 ) -> tuple[dr.DeviceEntry, ConfigEntry, ReolinkHost, int, datetime, VOD_file]:
     """Find the recording covering the requested moment.
 
@@ -140,8 +96,8 @@ async def _async_locate_recording(
     alarm means locating the block the moment falls in.
     """
     service_data = service_call.data
-    device, config_entry = _get_device_entry(
-        service_call, service_data[ATTR_DEVICE_ID], service_name
+    device, config_entry = service.async_get_device_and_config_entry(
+        service_call.hass, DOMAIN, service_data[ATTR_DEVICE_ID]
     )
 
     host: ReolinkHost = config_entry.runtime_data.host
@@ -189,7 +145,7 @@ async def _async_locate_recording(
 async def _async_vod_link(service_call: ServiceCall) -> ServiceResponse:
     """Return a link that plays the recording covering a given moment."""
     _device, config_entry, _host, channel, moment, recording = (
-        await _async_locate_recording(service_call, SERVICE_VOD_LINK)
+        await _async_locate_recording(service_call)
     )
     stream = service_call.data[ATTR_STREAM]
 
@@ -221,7 +177,7 @@ async def _async_vod_download(service_call: ServiceCall) -> ServiceResponse:
     and "pre_roll" of that sits before the moment.
     """
     device, _config_entry, host, channel, moment, recording = (
-        await _async_locate_recording(service_call, SERVICE_VOD_DOWNLOAD)
+        await _async_locate_recording(service_call)
     )
     service_data = service_call.data
     stream_res = service_data[ATTR_STREAM]
