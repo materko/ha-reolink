@@ -30,5 +30,5 @@
   "requirements": [
     "reolink-aio @ git+https://github.com/materko/reolink_aio@029a3b6680c19559838b79895cfaf0f3c9398ab7"
   ],
-  "version": "2026.9.4"
+  "version": "2026.10.0"
 }
