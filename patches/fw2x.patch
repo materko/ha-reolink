@@ -98,7 +98,7 @@ index 6a47a03..151124a 100644
  
      async def _async_generate_root(self) -> BrowseMediaSource:
 diff --git a/homeassistant/components/reolink/services.py b/homeassistant/components/reolink/services.py
-index d7e38d4..a9a9670 100644
+index 1328d36..ed11410 100644
 --- a/homeassistant/components/reolink/services.py
 +++ b/homeassistant/components/reolink/services.py
 @@ -1,23 +1,68 @@
@@ -111,12 +111,12 @@ index d7e38d4..a9a9670 100644
 +import os
 +from urllib.parse import quote
 +
+ import probatio
  from reolink_aio.api import Chime
 -from reolink_aio.enums import ChimeToneEnum
 +from reolink_aio.enums import ChimeToneEnum, VodRequestType
 +from reolink_aio.typings import VOD_file
 +from reolink_aio.utils import to_reolink_time_id
- import voluptuous as vol
  
  from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
 +from homeassistant.config_entries import ConfigEntry
@@ -175,7 +175,7 @@ index d7e38d4..a9a9670 100644
  
  @raise_translated_error
  async def _async_play_chime(service_call: ServiceCall) -> None:
-@@ -42,6 +87,180 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
+@@ -44,6 +89,182 @@ async def _async_play_chime(service_call: ServiceCall) -> None:
          await chime.play(ChimeToneEnum[ringtone].value)
  
  
@@ -193,7 +193,9 @@ index d7e38d4..a9a9670 100644
 +    )
 +
 +    host: ReolinkHost = config_entry.runtime_data.host
-+    (_device_uid, channel, is_chime) = get_device_uid_and_ch(device, host)
++    (_device_uid, channel, is_chime) = get_device_uid_and_ch(
++        device.identifiers, host
++    )
 +    if is_chime or channel is None:
 +        raise ServiceValidationError(
 +            translation_domain=DOMAIN,
@@ -356,7 +358,7 @@ index d7e38d4..a9a9670 100644
  @callback
  def async_setup_services(hass: HomeAssistant) -> None:
      """Set up Reolink services."""
-@@ -59,6 +278,38 @@ def async_setup_services(hass: HomeAssistant) -> None:
+@@ -61,6 +282,42 @@ def async_setup_services(hass: HomeAssistant) -> None:
              }
          ),
      )
@@ -364,12 +366,14 @@ index d7e38d4..a9a9670 100644
 +        DOMAIN,
 +        SERVICE_VOD_LINK,
 +        _async_vod_link,
-+        schema=vol.Schema(
++        schema=probatio.Schema(
 +            {
-+                vol.Required(ATTR_DEVICE_ID): cv.string,
-+                vol.Optional(ATTR_TIMESTAMP): cv.datetime,
-+                vol.Optional(ATTR_PRE_ROLL, default=0): cv.positive_int,
-+                vol.Optional(ATTR_STREAM, default="sub"): vol.In(["sub", "main"]),
++                probatio.Required(ATTR_DEVICE_ID): cv.string,
++                probatio.Optional(ATTR_TIMESTAMP): cv.datetime,
++                probatio.Optional(ATTR_PRE_ROLL, default=0): cv.positive_int,
++                probatio.Optional(ATTR_STREAM, default="sub"): probatio.In(
++                    ["sub", "main"]
++                ),
 +            }
 +        ),
 +        supports_response=SupportsResponse.ONLY,
@@ -378,16 +382,18 @@ index d7e38d4..a9a9670 100644
 +        DOMAIN,
 +        SERVICE_VOD_DOWNLOAD,
 +        _async_vod_download,
-+        schema=vol.Schema(
++        schema=probatio.Schema(
 +            {
-+                vol.Required(ATTR_DEVICE_ID): cv.string,
-+                vol.Optional(ATTR_TIMESTAMP): cv.datetime,
-+                vol.Optional(ATTR_PRE_ROLL, default=0): cv.positive_int,
-+                vol.Optional(ATTR_DURATION, default=30): vol.All(
-+                    cv.positive_int, vol.Range(min=1, max=600)
++                probatio.Required(ATTR_DEVICE_ID): cv.string,
++                probatio.Optional(ATTR_TIMESTAMP): cv.datetime,
++                probatio.Optional(ATTR_PRE_ROLL, default=0): cv.positive_int,
++                probatio.Optional(ATTR_DURATION, default=30): probatio.All(
++                    cv.positive_int, probatio.Range(min=1, max=600)
 +                ),
-+                vol.Optional(ATTR_FILENAME): cv.string,
-+                vol.Optional(ATTR_STREAM, default="sub"): vol.In(["sub", "main"]),
++                probatio.Optional(ATTR_FILENAME): cv.string,
++                probatio.Optional(ATTR_STREAM, default="sub"): probatio.In(
++                    ["sub", "main"]
++                ),
 +            }
 +        ),
 +        supports_response=SupportsResponse.OPTIONAL,
@@ -473,10 +479,10 @@ index fe7fba9..4261bf6 100644
    fields:
      device_id:
 diff --git a/homeassistant/components/reolink/strings.json b/homeassistant/components/reolink/strings.json
-index 5608556..8a696bf 100644
+index 1fcb860..60974df 100644
 --- a/homeassistant/components/reolink/strings.json
 +++ b/homeassistant/components/reolink/strings.json
-@@ -964,6 +964,21 @@
+@@ -963,6 +963,21 @@
      "service_not_chime": {
        "message": "Reolink play_chime error: {device_name} is not a Chime"
      },
@@ -498,7 +504,7 @@ index 5608556..8a696bf 100644
      "subscription_error": {
        "message": "Error during ONVIF subscription: {err}"
      },
-@@ -1064,6 +1079,58 @@
+@@ -1063,6 +1078,58 @@
          }
        },
        "name": "PTZ move"
@@ -558,7 +564,7 @@ index 5608556..8a696bf 100644
    }
  }
 diff --git a/homeassistant/components/reolink/util.py b/homeassistant/components/reolink/util.py
-index ecef195..6d28b72 100644
+index a71bbff..7972734 100644
 --- a/homeassistant/components/reolink/util.py
 +++ b/homeassistant/components/reolink/util.py
 @@ -2,8 +2,11 @@
@@ -573,15 +579,15 @@ index ecef195..6d28b72 100644
  from reolink_aio.exceptions import (
      ApiError,
      CredentialsInvalidError,
-@@ -26,6 +29,7 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
- from homeassistant.helpers import device_registry as dr
+@@ -25,6 +28,7 @@ from homeassistant.core import HomeAssistant
+ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
  from homeassistant.helpers.storage import Store
  from homeassistant.helpers.translation import async_get_exception_message
 +from homeassistant.util import dt as dt_util
  
  from .const import DOMAIN
  
-@@ -33,6 +37,8 @@ if TYPE_CHECKING:
+@@ -32,6 +36,8 @@ if TYPE_CHECKING:
      from .coordinator import ReolinkDeviceCoordinator, ReolinkFirmwareCoordinator
      from .host import ReolinkHost
  
@@ -590,7 +596,7 @@ index ecef195..6d28b72 100644
  STORAGE_VERSION = 1
  
  type ReolinkConfigEntry = config_entries.ConfigEntry[ReolinkData]
-@@ -56,6 +62,44 @@ def is_connected(hass: HomeAssistant, config_entry: config_entries.ConfigEntry)
+@@ -55,6 +61,44 @@ def is_connected(hass: HomeAssistant, config_entry: config_entries.ConfigEntry)
      )
  
  
