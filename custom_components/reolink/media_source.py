@@ -65,8 +65,11 @@ class ReolinkVODMediaSource(MediaSource):
         if item.identifier is not None:
             identifier = item.identifier.split("|", 6)
         if identifier[0] != "FILE":
-            # pylint: disable-next=home-assistant-exception-not-translated
-            raise Unresolvable(f"Unknown media item '{item.identifier}'.")
+            raise Unresolvable(
+                translation_domain=DOMAIN,
+                translation_key="unknown_media_item",
+                translation_placeholders={"identifier": str(item.identifier)},
+            )
 
         _, config_entry_id, channel_str, stream_res, filename, start_time, end_time = (
             identifier
@@ -169,7 +172,6 @@ class ReolinkVODMediaSource(MediaSource):
                 event,
             )
 
-        # pylint: disable-next=home-assistant-exception-not-translated
         if item_type == "FILE":
             (
                 _,
@@ -216,7 +218,11 @@ class ReolinkVODMediaSource(MediaSource):
                 ],
             )
 
-        raise Unresolvable(f"Unknown media item '{item.identifier}' during browsing.")
+        raise Unresolvable(
+            translation_domain=DOMAIN,
+            translation_key="unknown_media_item",
+            translation_placeholders={"identifier": str(item.identifier)},
+        )
 
     async def _async_generate_root(self) -> BrowseMediaSource:
         """Return all available reolink cameras as root browsing structure."""

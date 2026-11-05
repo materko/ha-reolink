@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from functools import partial
 import logging
 import os
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import probatio
@@ -14,8 +15,9 @@ from reolink_aio.typings import VOD_file
 from reolink_aio.utils import to_reolink_time_id
 
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN
+from homeassistant.components.camera import DOMAIN as CAMERA_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_DEVICE_ID
+from homeassistant.const import ATTR_DEVICE_ID, CONF_FILENAME
 from homeassistant.core import (
     HomeAssistant,
     ServiceCall,
@@ -29,6 +31,8 @@ from homeassistant.helpers import (
     device_registry as dr,
     service,
 )
+from homeassistant.helpers.os_error import os_write_error
+from homeassistant.helpers.template import Template
 from homeassistant.util import dt as dt_util, slugify
 
 from .const import DOMAIN, SUPPORT_PTZ_SPEED
@@ -40,11 +44,14 @@ from .util import (
     raise_translated_error,
 )
 
+if TYPE_CHECKING:
+    from .camera import ReolinkCamera
+
 ATTR_RINGTONE = "ringtone"
 ATTR_SPEED = "speed"
-SERVICE_PTZ_MOVE = "ptz_move"
-
 ATTR_TIMESTAMP = "timestamp"
+SERVICE_PTZ_MOVE = "ptz_move"
+SERVICE_SNAPSHOT_PAST = "snapshot_past"
 ATTR_PRE_ROLL = "pre_roll"
 ATTR_STREAM = "stream"
 ATTR_DURATION = "duration"
@@ -62,6 +69,39 @@ VOD_SEARCH_MARGIN = timedelta(hours=4)
 FFMPEG_GRACE = 60
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _write_image(to_file: str, image: bytes) -> None:
+    """Write the image to a file, called in the executor."""
+    os.makedirs(os.path.dirname(to_file), exist_ok=True)
+    with open(to_file, "wb") as img_file:
+        img_file.write(image)
+
+
+async def _async_snapshot_past(
+    camera: ReolinkCamera, service_call: ServiceCall
+) -> None:
+    """Save a snapshot of a past moment in time to a file."""
+    hass = camera.hass
+    filename: Template = service_call.data[CONF_FILENAME]
+    snapshot_file = filename.async_render()
+
+    if not await hass.async_add_executor_job(
+        hass.config.is_allowed_path, snapshot_file
+    ):
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="no_access_to_path",
+            translation_placeholders={"filename": snapshot_file},
+        )
+
+    image = await camera.async_camera_image_past(service_call.data[ATTR_TIMESTAMP])
+
+    try:
+        await hass.async_add_executor_job(_write_image, snapshot_file, image)
+    except OSError as err:
+        raise os_write_error(err, snapshot_file) from err
+
 
 
 @raise_translated_error
@@ -326,4 +366,15 @@ def async_setup_services(hass: HomeAssistant) -> None:
         schema={probatio.Required(ATTR_SPEED): cv.positive_int},
         func="async_ptz_move",
         required_features=[SUPPORT_PTZ_SPEED],
+    )
+    service.async_register_platform_entity_service(
+        hass,
+        DOMAIN,
+        SERVICE_SNAPSHOT_PAST,
+        entity_domain=CAMERA_DOMAIN,
+        schema={
+            probatio.Required(CONF_FILENAME): cv.template,
+            probatio.Required(ATTR_TIMESTAMP): cv.datetime,
+        },
+        func=_async_snapshot_past,
     )
