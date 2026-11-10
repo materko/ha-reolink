@@ -14,7 +14,7 @@ permissions:
 env:
   # The patched reolink-aio, pinned to a commit so every build is reproducible.
   # Bump this by hand after rebasing https://github.com/materko/reolink_aio
-  REOLINK_AIO: "reolink-aio @ git+https://github.com/materko/reolink_aio@029a3b6680c19559838b79895cfaf0f3c9398ab7"
+  REOLINK_AIO: "reolink-aio @ git+https://github.com/materko/reolink_aio@a98371a8102fe10a0387a7a4025bc520c402b5c7"
 
 jobs:
   build:
