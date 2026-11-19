@@ -574,7 +574,7 @@ index e32d1698ad..9491e8a0d4 100644
    }
  }
 diff --git a/homeassistant/components/reolink/util.py b/homeassistant/components/reolink/util.py
-index f8338b409a..8134614be5 100644
+index f8338b409a..08dc7d4487 100644
 --- a/homeassistant/components/reolink/util.py
 +++ b/homeassistant/components/reolink/util.py
 @@ -2,8 +2,11 @@
@@ -606,7 +606,7 @@ index f8338b409a..8134614be5 100644
  STORAGE_VERSION = 1
  
  type ReolinkConfigEntry = config_entries.ConfigEntry[ReolinkData]
-@@ -55,6 +61,44 @@ def is_connected(hass: HomeAssistant, config_entry: config_entries.ConfigEntry)
+@@ -55,6 +61,42 @@ def is_connected(hass: HomeAssistant, config_entry: config_entries.ConfigEntry)
      )
  
  
@@ -616,12 +616,10 @@ index f8338b409a..8134614be5 100644
 +        # Firmware 2.x NVRs support neither the Download nor the Playback command,
 +        # their recordings are only reachable over plain RTMP.
 +        return VodRequestType.RTMP
-+    if filename.endswith((".mp4", ".vref")) or host.api.is_hub:
-+        if host.api.is_nvr:
-+            return VodRequestType.DOWNLOAD
-+        return VodRequestType.PLAYBACK
 +    if host.api.is_nvr:
 +        return VodRequestType.NVR_DOWNLOAD
++    if filename.endswith((".mp4", ".vref")):
++        return VodRequestType.PLAYBACK
 +    return VodRequestType.RTMP
 +
 +
