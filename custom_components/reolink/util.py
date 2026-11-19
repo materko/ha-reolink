@@ -67,12 +67,10 @@ def get_vod_type(host: ReolinkHost, filename: str) -> VodRequestType:
         # Firmware 2.x NVRs support neither the Download nor the Playback command,
         # their recordings are only reachable over plain RTMP.
         return VodRequestType.RTMP
-    if filename.endswith((".mp4", ".vref")) or host.api.is_hub:
-        if host.api.is_nvr:
-            return VodRequestType.DOWNLOAD
-        return VodRequestType.PLAYBACK
     if host.api.is_nvr:
         return VodRequestType.NVR_DOWNLOAD
+    if filename.endswith((".mp4", ".vref")):
+        return VodRequestType.PLAYBACK
     return VodRequestType.RTMP
 
 
